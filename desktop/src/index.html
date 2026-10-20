@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+    <title>MirrorLink USB</title>
+    <style>
+        body {
+            margin: 0;
+            background: #10131a;
+            color: #eff4ff;
+            font: 16px system-ui;
+            text-align: center
+        }
+
+        header {
+            padding: 24px
+        }
+
+        button {
+            padding: 11px 17px;
+            border: 0;
+            border-radius: 7px;
+            margin: 0 5px;
+            background: #3e83f8;
+            color: white;
+            font-weight: 600
+        }
+
+        #status {
+            color: #b8c4d9;
+            min-height: 24px
+        }
+
+        canvas {
+            max-width: 95vw;
+            max-height: 76vh;
+            margin: 18px;
+            background: #06080c;
+            box-shadow: 0 5px 25px #000
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>MirrorLink USB</h1>
+        <p id="status">Connect an Android phone by USB and open the MirrorLink app.</p><button id="connect">Connect by
+            USB</button><button id="disconnect">Disconnect</button>
+    </header><canvas id="screen"></canvas>
+    <script src="renderer.js"></script>
+</body>
+
+</html>

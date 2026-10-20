@@ -1,0 +1,37 @@
+{
+  "name": "mirrorlink-usb-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mirror an Android screen over USB",
+  "author": "Retesh Sharma",
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "postinstall": "node scripts/ensure-electron.js",
+    "package:mac": "electron-builder --mac",
+    "package:win": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.mirrorlink.usb",
+    "productName": "MirrorLink USB",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "25.1.8"
+  }
+}

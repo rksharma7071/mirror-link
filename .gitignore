@@ -1,0 +1,23 @@
+# Android / Gradle
+.gradle/
+.idea/
+**/build/
+local.properties
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Electron / Node.js
+desktop/node_modules/
+desktop/dist/
+desktop/out/
+desktop/release/
+
+# Local scratch files and generated source listings
+android/code_android.txt
+android/export_code.js
+android/getCode.js
+desktop/code_desktop.txt
+desktop/export_code.js
+desktop/getCode.js
