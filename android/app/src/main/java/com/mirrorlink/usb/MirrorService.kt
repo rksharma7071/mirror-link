@@ -42,20 +42,24 @@ class MirrorService : Service() {
         const val EXTRA_RESULT_CODE = "resultCode"
         const val EXTRA_RESULT_DATA = "resultData"
         const val PORT = 27183
-        private const val FPS = 30
-        private const val MAX_LONG_EDGE = 1280
+        private const val PROTOCOL_VERSION = 2
+        private const val FPS = 60
+        private const val MAX_LONG_EDGE = 1920
     }
 
     private val running = AtomicBoolean(false)
+    private val captureLock = Any()
     private var codec: MediaCodec? = null
     private var inputSurface: Surface? = null
     private var projection: MediaProjection? = null
     private var projectionCallback: MediaProjection.Callback? = null
     private var virtualDisplay: VirtualDisplay? = null
+    private var displayListener: DisplayManager.DisplayListener? = null
     @Volatile private var server: ServerSocket? = null
     private var drainThread: Thread? = null
     private var width = 0
     private var height = 0
+    private var captureDpi = 0
 
     private val sinkLock = Any()
     @Volatile private var clientSocket: Socket? = null
@@ -89,28 +93,13 @@ class MirrorService : Service() {
         val dm = DisplayMetrics()
         @Suppress("DEPRECATION")
         getSystemService(WindowManager::class.java).defaultDisplay.getRealMetrics(dm)
-        val scale = min(1f, MAX_LONG_EDGE.toFloat() / max(dm.widthPixels, dm.heightPixels))
-        width = align16(dm.widthPixels * scale)
-        height = align16(dm.heightPixels * scale)
-        val dpi = (dm.densityDpi * scale).roundToInt().coerceAtLeast(72)
-
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, 5_000_000)
-            setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-            setInteger(MediaFormat.KEY_LATENCY, 0)
-            setInteger(MediaFormat.KEY_PRIORITY, 0)
-            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-            setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
-        }
-
-        codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
-            configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            inputSurface = createInputSurface()
-            start()
-        }
+        val (captureWidth, captureHeight, dpi) = captureSize(dm)
+        width = captureWidth
+        height = captureHeight
+        captureDpi = dpi
+        val (newCodec, newSurface) = createEncoder(width, height)
+        codec = newCodec
+        inputSurface = newSurface
 
         val pm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projection = pm.getMediaProjection(resultCode, resultData)
@@ -126,29 +115,105 @@ class MirrorService : Service() {
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, inputSurface, null, null
         )
 
-        drainThread = thread(name = "mirror-encoder") { drainEncoder() }
+        drainThread = thread(name = "mirror-encoder") { drainEncoder(newCodec) }
         thread(name = "mirror-accept") { acceptLoop() }
+
+        val displayManager = getSystemService(DisplayManager::class.java)
+        displayListener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) = Unit
+            override fun onDisplayRemoved(displayId: Int) = Unit
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId == android.view.Display.DEFAULT_DISPLAY) handleDisplayRotation()
+            }
+        }.also { displayManager.registerDisplayListener(it, Handler(Looper.getMainLooper())) }
+    }
+
+    private fun captureSize(dm: DisplayMetrics): Triple<Int, Int, Int> {
+        val scale = min(1f, MAX_LONG_EDGE.toFloat() / max(dm.widthPixels, dm.heightPixels))
+        val captureWidth = align16(dm.widthPixels * scale)
+        val captureHeight = align16(dm.heightPixels * scale)
+        val dpi = (dm.densityDpi * scale).roundToInt().coerceAtLeast(72)
+        return Triple(captureWidth, captureHeight, dpi)
+    }
+
+    private fun createEncoder(width: Int, height: Int): Pair<MediaCodec, Surface> {
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, 10_000_000)
+            setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            setInteger(MediaFormat.KEY_LATENCY, 0)
+            setInteger(MediaFormat.KEY_PRIORITY, 0)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            }
+        }
+
+        try {
+            val highFormat = MediaFormat(format).apply {
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel42)
+            }
+            val created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            created.configure(highFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val surface = created.createInputSurface()
+            created.start()
+            Log.i(TAG, "Configured encoder with High profile at 16 Mbps 60 FPS")
+            return created to surface
+        } catch (e: Exception) {
+            Log.w(TAG, "High profile not supported, using Baseline profile", e)
+            format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+            format.setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+            val created = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            created.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val surface = created.createInputSurface()
+            created.start()
+            return created to surface
+        }
+    }
+
+    private fun handleDisplayRotation() {
+        val dm = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        getSystemService(WindowManager::class.java).defaultDisplay.getRealMetrics(dm)
+        val (nextWidth, nextHeight, nextDpi) = captureSize(dm)
+        if (nextWidth == width && nextHeight == height && nextDpi == captureDpi) return
+
+        thread(name = "mirror-resize") {
+            synchronized(captureLock) {
+                if (!running.get() || (nextWidth == width && nextHeight == height && nextDpi == captureDpi)) return@synchronized
+                Log.i(TAG, "Display changed to ${nextWidth}x${nextHeight}; rebuilding encoder")
+                virtualDisplay?.setSurface(null)
+                val oldCodec = codec
+                codec = null
+                try { drainThread?.join(2500) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+                try { oldCodec?.stop() } catch (_: Exception) {}
+                try { oldCodec?.release() } catch (_: Exception) {}
+                try { inputSurface?.release() } catch (_: Exception) {}
+
+                width = nextWidth
+                height = nextHeight
+                captureDpi = nextDpi
+                codecConfig = null
+                val (newCodec, newSurface) = createEncoder(width, height)
+                codec = newCodec
+                inputSurface = newSurface
+                virtualDisplay?.resize(width, height, captureDpi)
+                virtualDisplay?.setSurface(newSurface)
+                sendResolutionChange(width, height)
+                drainThread = thread(name = "mirror-encoder") { drainEncoder(newCodec) }
+            }
+        }
     }
 
     /** Always drains the encoder, continuously sending frames to the connected client. */
-    private fun drainEncoder() {
-        val c = codec ?: return
+    private fun drainEncoder(c: MediaCodec) {
         val info = MediaCodec.BufferInfo()
         var frameCount = 0L
-        var lastSyncRequest = System.currentTimeMillis()
         try {
-            while (running.get()) {
-                val now = System.currentTimeMillis()
-                if (now - lastSyncRequest > 2000L) {
-                    lastSyncRequest = now
-                    try {
-                        c.setParameters(Bundle().apply {
-                            putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                        })
-                    } catch (_: Exception) {}
-                }
-
-                val index = c.dequeueOutputBuffer(info, 10_000)
+            while (running.get() && codec === c) {
+                val index = c.dequeueOutputBuffer(info, 2_000)
                 if (index < 0) continue
                 try {
                     val buf = c.getOutputBuffer(index)
@@ -188,6 +253,22 @@ class MirrorService : Service() {
                 out.flush()
             } catch (e: IOException) {
                 Log.i(TAG, "Client write failed: ${e.message}")
+                closeClientLocked()
+            }
+        }
+    }
+
+    private fun sendResolutionChange(width: Int, height: Int) {
+        synchronized(sinkLock) {
+            val out = sink ?: return
+            try {
+                out.writeInt(0) // A zero payload length starts the v2 resolution update.
+                out.writeInt(width)
+                out.writeInt(height)
+                out.writeInt(FPS)
+                out.flush()
+            } catch (e: IOException) {
+                Log.i(TAG, "Failed to send resolution update: ${e.message}")
                 closeClientLocked()
             }
         }
@@ -238,9 +319,9 @@ class MirrorService : Service() {
         clientSocket?.let { try { it.close() } catch (_: Exception) {} }
         synchronized(sinkLock) {
             closeClientLocked()
-            val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
+            val out = DataOutputStream(socket.getOutputStream())
             out.write("MLNK".toByteArray(Charsets.US_ASCII))
-            out.writeInt(1)
+            out.writeInt(PROTOCOL_VERSION)
             out.writeInt(width)
             out.writeInt(height)
             out.writeInt(FPS)
@@ -276,6 +357,9 @@ class MirrorService : Service() {
     override fun onDestroy() {
         Log.i(TAG, "MirrorService onDestroy")
         running.set(false)
+        displayListener?.let {
+            try { getSystemService(DisplayManager::class.java).unregisterDisplayListener(it) } catch (_: Exception) {}
+        }
         try { server?.close() } catch (_: Exception) {}
         synchronized(sinkLock) { closeClientLocked() }
         try { drainThread?.join(500) } catch (_: InterruptedException) {}

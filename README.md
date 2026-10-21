@@ -26,6 +26,8 @@ npm run dev
 
 Connect the phone by USB, authorize its debugging prompt, open MirrorLink USB on the phone and tap **Start sharing**. Then choose **Connect by USB** in the desktop app.
 
+Before connecting, choose a decoded **Size** limit and **FPS** limit in the desktop header. **Auto** keeps the incoming stream size or frame rate; smaller sizes and lower FPS reduce desktop decoding and rendering work. These controls currently apply when you connect and do not change the phone encoder or USB stream bitrate.
+
 ## Wire protocol
 
 The phone exposes a TCP server only on `127.0.0.1:27183`. The desktop maps that socket with:
@@ -39,12 +41,14 @@ The stream begins with a 20-byte big-endian header:
 | Bytes | Value |
 | --- | --- |
 | 0–3 | `MLNK` magic |
-| 4–7 | protocol version (`1`) |
+| 4–7 | protocol version (`1` or `2`) |
 | 8–11 | video width |
 | 12–15 | video height |
 | 16–19 | frame rate |
 
 Each subsequent H.264 access unit is prefixed by a four-byte big-endian payload length. The desktop removes that prefix before writing bytes to FFmpeg.
+
+Protocol version 2 reserves a zero payload length for a screen-size update, followed by three big-endian 32-bit values: width, height, and FPS. Android sends this update after a display rotation; the desktop restarts its decoder and resizes the display canvases for the new orientation. Version 1 senders continue to work without live resize updates.
 
 ## Release notes
 

@@ -8,18 +8,36 @@ const fs = require('fs');
 
 const execFileAsync = promisify(execFile);
 const PORT = 27183;
-const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 let mainWindow = null;
+let popoutWindow = null;
 let session = null; // one active session at a time
 
-// Augment process.env.PATH with common tool directories (Android SDK, Homebrew, etc.)
+// IPC Flow-control state: ensure zero queue buildup across Electron IPC
+let mainInFlight = false;
+let popoutInFlight = false;
+let pendingMainFrame = null;
+let pendingPopoutFrame = null;
+
+function resetFrameQueue() {
+  mainInFlight = false;
+  popoutInFlight = false;
+  pendingMainFrame = null;
+  pendingPopoutFrame = null;
+}
+
+// Augment process.env.PATH with common tool directories (Android SDK, Homebrew, FFmpeg, etc.)
 function augmentPath() {
   const extraDirs = [
     path.join(os.homedir(), 'Library/Android/sdk/platform-tools'),
     path.join(os.homedir(), 'Android/Sdk/platform-tools'),
     '/opt/homebrew/bin',
     '/opt/homebrew/sbin',
-    '/usr/local/bin'
+    '/usr/local/bin',
+    'C:\\ffmpeg\\bin',
+    path.join(os.homedir(), 'ffmpeg', 'bin'),
+    path.join(process.env.LOCALAPPDATA || '', 'ffmpeg', 'bin'),
+    'C:\\Program Files\\ffmpeg\\bin'
   ];
   const currentPath = process.env.PATH || '';
   const pathSet = new Set(currentPath.split(path.delimiter));
@@ -96,7 +114,17 @@ function findFfmpeg() {
   if (process.platform === 'darwin') {
     candidates.push('/opt/homebrew/bin/ffmpeg');
     candidates.push('/usr/local/bin/ffmpeg');
-  } else if (!isWin) {
+  } else if (isWin) {
+    candidates.push('C:\\ffmpeg\\bin\\ffmpeg.exe');
+    candidates.push(path.join(os.homedir(), 'ffmpeg', 'bin', 'ffmpeg.exe'));
+    if (process.env.LOCALAPPDATA) {
+      candidates.push(path.join(process.env.LOCALAPPDATA, 'ffmpeg', 'bin', 'ffmpeg.exe'));
+      candidates.push(path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'ffmpeg.exe'));
+    }
+    if (process.env.PROGRAMFILES) {
+      candidates.push(path.join(process.env.PROGRAMFILES, 'ffmpeg', 'bin', 'ffmpeg.exe'));
+    }
+  } else {
     candidates.push('/usr/bin/ffmpeg');
     candidates.push('/usr/local/bin/ffmpeg');
   }
@@ -148,19 +176,59 @@ async function connectedDevice() {
 
 function sendStatus(message) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('status', message);
+  if (popoutWindow && !popoutWindow.isDestroyed()) popoutWindow.webContents.send('status', message);
 }
 
-function pushFrame(frame) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.send('frame', frame);
+function sendVideoSize(header) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('video-size', header);
+  if (popoutWindow && !popoutWindow.isDestroyed()) popoutWindow.webContents.send('video-size', header);
 }
 
-ipcMain.on('frame-ack', () => {
-  // Kept for backward compatibility
+function pushLatestFrame(frame) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (!mainInFlight) {
+      mainInFlight = true;
+      mainWindow.webContents.send('frame', frame);
+    } else {
+      pendingMainFrame = frame;
+    }
+  }
+
+  if (popoutWindow && !popoutWindow.isDestroyed()) {
+    if (!popoutInFlight) {
+      popoutInFlight = true;
+      popoutWindow.webContents.send('frame', frame);
+    } else {
+      pendingPopoutFrame = frame;
+    }
+  }
+}
+
+// Flow control: Renderer acknowledges it has finished displaying the frame.
+ipcMain.on('frame-ack', (event) => {
+  const isPopout = popoutWindow && !popoutWindow.isDestroyed() && event.sender === popoutWindow.webContents;
+  if (isPopout) {
+    if (pendingPopoutFrame && popoutWindow && !popoutWindow.isDestroyed()) {
+      const next = pendingPopoutFrame;
+      pendingPopoutFrame = null;
+      popoutWindow.webContents.send('frame', next);
+    } else {
+      popoutInFlight = false;
+    }
+  } else {
+    if (pendingMainFrame && mainWindow && !mainWindow.isDestroyed()) {
+      const next = pendingMainFrame;
+      pendingMainFrame = null;
+      mainWindow.webContents.send('frame', next);
+    } else {
+      mainInFlight = false;
+    }
+  }
 });
 
 // ---- session lifecycle (every handler is bound to its own session object) ----
 async function endSession(s, message) {
+  resetFrameQueue();
   if (!s || s.closed) return;
   s.closed = true;
   if (session === s) session = null;
@@ -175,8 +243,9 @@ async function endSession(s, message) {
   }
 }
 
-async function connect() {
+async function connect(settings = {}) {
   if (session) await endSession(session);
+  resetFrameQueue();
 
   const serial = await connectedDevice();
   await adb(['-s', serial, 'forward', `tcp:${PORT}`, `tcp:${PORT}`]);
@@ -185,6 +254,10 @@ async function connect() {
     serial, socket: null, ffmpeg: null, closed: false,
     pending: Buffer.alloc(0), header: null, started: false, hadError: false,
     spsPps: null, firstKeyframe: null
+  };
+  s.settings = {
+    maxEdge: [640, 960, 1280, 1920].includes(Number(settings.maxEdge)) ? Number(settings.maxEdge) : 0,
+    fps: [15, 24, 30, 60].includes(Number(settings.fps)) ? Number(settings.fps) : 0
   };
   session = s;
   sendStatus(`Connected to ${serial}. Waiting for screen stream…`);
@@ -214,7 +287,7 @@ async function connect() {
         return void endSession(s, 'The connected app is not a MirrorLink USB sender.');
       }
       const version = s.pending.readUInt32BE(4);
-      if (version !== 1) {
+      if (version !== 1 && version !== 2) {
         s.hadError = true;
         return void endSession(s, `Unsupported MirrorLink protocol version ${version}.`);
       }
@@ -226,12 +299,31 @@ async function connect() {
       };
       s.pending = s.pending.subarray(20);
       s.started = true;
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('video-size', s.header);
       startDecoder(s, s.header);
     }
 
     while (s.header && s.pending.length >= 4) {
       const size = s.pending.readUInt32BE(0);
+      if (size === 0) {
+        if (s.header.version < 2) {
+          s.hadError = true;
+          return void endSession(s, 'The sender sent an unsupported screen size update.');
+        }
+        if (s.pending.length < 16) break;
+        const width = s.pending.readUInt32BE(4);
+        const height = s.pending.readUInt32BE(8);
+        const nextFps = s.pending.readUInt32BE(12);
+        s.pending = s.pending.subarray(16);
+        if (!width || !height || width > 8192 || height > 8192) {
+          s.hadError = true;
+          return void endSession(s, 'The phone sent an invalid screen size update.');
+        }
+        s.header = { ...s.header, width, height, fps: nextFps };
+        s.spsPps = null;
+        s.firstKeyframe = null;
+        startDecoder(s, s.header);
+        continue;
+      }
       if (size > MAX_FRAME_BYTES) {
         s.hadError = true;
         return void endSession(s, 'Invalid video frame received.');
@@ -268,27 +360,36 @@ async function connect() {
 }
 
 function startDecoder(s, { width, height, fps }) {
-  const targetFps = fps || 30;
-  const ff = spawn(findFfmpeg(), [
+  resetFrameQueue();
+  const scale = s.settings.maxEdge ? Math.min(1, s.settings.maxEdge / Math.max(width, height)) : 1;
+  const outputWidth = Math.max(2, Math.floor(width * scale / 2) * 2);
+  const outputHeight = Math.max(2, Math.floor(height * scale / 2) * 2);
+  s.outputHeader = { ...s.header, width: outputWidth, height: outputHeight };
+  const filters = [];
+  if (outputWidth !== width || outputHeight !== height) filters.push(`scale=${outputWidth}:${outputHeight}:flags=fast_bilinear`);
+  const args = [
     '-loglevel', 'error',
     '-probesize', '32',
     '-analyzeduration', '0',
     '-fpsprobesize', '0',
-    '-fflags', 'nobuffer',
     '-flags', 'low_delay',
     '-threads', '1',
     '-f', 'h264',
-    '-r', String(targetFps),
     '-i', 'pipe:0',
-    '-an',
-    '-f', 'rawvideo',
-    '-pix_fmt', 'rgba',
-    'pipe:1'
-  ]);
+    '-an'
+  ];
+  if (filters.length) args.push('-vf', filters.join(','));
+  args.push('-f', 'rawvideo', '-pix_fmt', 'rgba', 'pipe:1');
+  const previousDecoder = s.ffmpeg;
+  const ff = spawn(findFfmpeg(), args);
   s.ffmpeg = ff;
+  if (previousDecoder) {
+    try { previousDecoder.stdin.destroy(); } catch (_) { }
+    previousDecoder.kill();
+  }
 
   ff.on('error', err => {
-    endSession(s, `FFmpeg error (${err.message}). Make sure FFmpeg is installed (e.g. brew install ffmpeg).`);
+    endSession(s, `FFmpeg error (${err.message}). Make sure FFmpeg is installed.`);
   });
   ff.stdin.on('error', () => { }); // EPIPE when ffmpeg exits / session ends
   ff.stderr.on('data', data => {
@@ -296,27 +397,37 @@ function startDecoder(s, { width, height, fps }) {
     if (msg) console.error('[FFmpeg]', msg);
   });
   ff.on('close', () => {
-    if (!s.closed) endSession(s, 'Video decoder stopped.');
+    if (!s.closed && s.ffmpeg === ff) endSession(s, 'Video decoder stopped.');
   });
 
-  // Collect chunks and concat once per frame (avoids O(n²) copying).
-  const frameBytes = width * height * 4;
+  // Collect chunks and concat once per frame
+  const frameBytes = outputWidth * outputHeight * 4;
   let chunks = [];
   let buffered = 0;
   let framesDecoded = 0;
+  let lastFrameDispatchAt = 0;
+  const minFrameInterval = s.settings.fps ? 1000 / s.settings.fps : 0;
 
   ff.stdout.on('data', data => {
     if (s.closed) return;
     chunks.push(data);
     buffered += data.length;
+    let newestFrame = null;
     while (buffered >= frameBytes) {
       framesDecoded++;
       const all = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, buffered);
-      const frame = Buffer.from(all.subarray(0, frameBytes)); // exact-size copy for IPC
+      newestFrame = Buffer.from(all.subarray(0, frameBytes));
       const rest = all.subarray(frameBytes);
       chunks = rest.length ? [rest] : [];
       buffered = rest.length;
-      pushFrame(frame);
+    }
+    // Only dispatch the newest decoded frame; drop any stale burst frames!
+    if (newestFrame) {
+      const now = Date.now();
+      if (!minFrameInterval || now - lastFrameDispatchAt >= minFrameInterval) {
+        lastFrameDispatchAt = now;
+        pushLatestFrame(newestFrame);
+      }
     }
   });
 
@@ -329,13 +440,22 @@ function startDecoder(s, { width, height, fps }) {
     }
   }, 250);
 
-  sendStatus(`Streaming ${width}×${height}.`);
+  sendVideoSize({ width: outputWidth, height: outputHeight, fps });
+  const sizeLabel = outputWidth === width && outputHeight === height ? 'Auto size' : `${outputWidth}×${outputHeight}`;
+  const fpsLabel = s.settings.fps ? `up to ${s.settings.fps}fps` : `${fps || 'Auto'}fps`;
+  sendStatus(`Live: ${sizeLabel} @ ${fpsLabel}.`);
 }
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 740,
+function createPopoutWindow() {
+  if (popoutWindow && !popoutWindow.isDestroyed()) {
+    popoutWindow.focus();
+    return;
+  }
+  popoutWindow = new BrowserWindow({
+    width: 900,
+    height: 750,
+    title: 'MirrorLink USB - Tab 2 (Detached)',
+    backgroundColor: '#10131a',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -343,9 +463,51 @@ function createWindow() {
       sandbox: true
     }
   });
+  popoutWindow.loadFile(path.join(__dirname, 'popout.html'));
+
+  popoutWindow.webContents.on('did-finish-load', () => {
+    if (session && session.header) {
+      popoutWindow.webContents.send('video-size', session.outputHeader || session.header);
+      popoutWindow.webContents.send('status', `Live: ${session.outputHeader?.width || session.header.width}×${session.outputHeader?.height || session.header.height}`);
+    }
+  });
+
+  popoutWindow.on('closed', () => {
+    popoutWindow = null;
+    popoutInFlight = false;
+    pendingPopoutFrame = null;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('popout-status', { isPoppedOut: false });
+    }
+  });
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('popout-status', { isPoppedOut: true });
+  }
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1100,
+    height: 820,
+    backgroundColor: '#10131a',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.on('closed', () => {
     mainWindow = null;
+    mainInFlight = false;
+    pendingMainFrame = null;
+    if (popoutWindow && !popoutWindow.isDestroyed()) {
+      popoutWindow.close();
+    }
     endSession(session);
   });
 }
@@ -361,9 +523,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-ipcMain.handle('connect', async () => {
+ipcMain.handle('connect', async (_event, settings) => {
   try {
-    await connect();
+    await connect(settings);
     return { ok: true };
   } catch (error) {
     sendStatus(error.message);
@@ -376,4 +538,23 @@ ipcMain.handle('disconnect', async () => {
   sendStatus('Disconnected.');
 });
 
-app.on('before-quit', () => { endSession(session); });
+ipcMain.handle('open-popout', async () => {
+  createPopoutWindow();
+  return { ok: true };
+});
+
+ipcMain.handle('close-popout', async () => {
+  if (popoutWindow && !popoutWindow.isDestroyed()) {
+    popoutWindow.close();
+    popoutWindow = null;
+  }
+  return { ok: true };
+});
+
+ipcMain.handle('get-popout-status', async () => {
+  return { isPoppedOut: !!(popoutWindow && !popoutWindow.isDestroyed()) };
+});
+
+app.on('before-quit', () => {
+  endSession(session);
+});
