@@ -24,12 +24,13 @@ import android.view.Surface
 import android.view.WindowManager
 import androidx.core.app.ServiceCompat
 import androidx.core.content.IntentCompat
-import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.max
@@ -45,6 +46,9 @@ class MirrorService : Service() {
         private const val PROTOCOL_VERSION = 2
         private const val FPS = 60
         private const val MAX_LONG_EDGE = 1920
+        private const val BITRATE_BPS = 8_000_000
+        private const val MAX_BITRATE_BPS = 12_000_000
+        private const val SEND_QUEUE_CAPACITY = 8
     }
 
     private val running = AtomicBoolean(false)
@@ -57,14 +61,19 @@ class MirrorService : Service() {
     private var displayListener: DisplayManager.DisplayListener? = null
     @Volatile private var server: ServerSocket? = null
     private var drainThread: Thread? = null
+    private var writerThread: Thread? = null
     private var width = 0
     private var height = 0
     private var captureDpi = 0
 
+    // ---- client sink ----
     private val sinkLock = Any()
     @Volatile private var clientSocket: Socket? = null
     private var sink: DataOutputStream? = null
-    @Volatile private var codecConfig: ByteArray? = null
+
+    // ---- bounded send queue (drop-oldest under pressure) ----
+    private class OutFrame(val data: ByteArray, val isKey: Boolean)
+    private val sendQueue = ArrayBlockingQueue<OutFrame>(SEND_QUEUE_CAPACITY)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         ServiceCompat.startForeground(
@@ -116,6 +125,7 @@ class MirrorService : Service() {
         )
 
         drainThread = thread(name = "mirror-encoder") { drainEncoder(newCodec) }
+        writerThread = thread(name = "mirror-writer") { writerLoop() }
         thread(name = "mirror-accept") { acceptLoop() }
 
         val displayManager = getSystemService(DisplayManager::class.java)
@@ -139,10 +149,15 @@ class MirrorService : Service() {
     private fun createEncoder(width: Int, height: Int): Pair<MediaCodec, Surface> {
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, 10_000_000)
+            setInteger(MediaFormat.KEY_BIT_RATE, BITRATE_BPS)
+            setInteger(MediaFormat.KEY_MAX_BIT_RATE, MAX_BITRATE_BPS)
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
+            setInteger(MediaFormat.KEY_MAX_FPS_TO_ENCODER, FPS)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, FPS)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            // Embed SPS/PPS in every IDR — removes the need for the desktop-side SPS cache / resend hack.
+            setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
             setInteger(MediaFormat.KEY_LATENCY, 0)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
@@ -159,7 +174,7 @@ class MirrorService : Service() {
             created.configure(highFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val surface = created.createInputSurface()
             created.start()
-            Log.i(TAG, "Configured encoder with High profile at 16 Mbps 60 FPS")
+            Log.i(TAG, "Configured encoder: High profile, CBR ${BITRATE_BPS / 1_000_000} Mbps, ${FPS} FPS")
             return created to surface
         } catch (e: Exception) {
             Log.w(TAG, "High profile not supported, using Baseline profile", e)
@@ -187,7 +202,8 @@ class MirrorService : Service() {
                 virtualDisplay?.setSurface(null)
                 val oldCodec = codec
                 codec = null
-                try { drainThread?.join(2500) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+                // Encoder drain exits quickly now — it just enqueues, no blocking writes.
+                try { drainThread?.join(1500) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
                 try { oldCodec?.stop() } catch (_: Exception) {}
                 try { oldCodec?.release() } catch (_: Exception) {}
                 try { inputSurface?.release() } catch (_: Exception) {}
@@ -195,7 +211,8 @@ class MirrorService : Service() {
                 width = nextWidth
                 height = nextHeight
                 captureDpi = nextDpi
-                codecConfig = null
+                // Purge stale frames before the new resolution takes effect.
+                sendQueue.clear()
                 val (newCodec, newSurface) = createEncoder(width, height)
                 codec = newCodec
                 inputSurface = newSurface
@@ -207,7 +224,7 @@ class MirrorService : Service() {
         }
     }
 
-    /** Always drains the encoder, continuously sending frames to the connected client. */
+    /** Drains the encoder output queue and enqueues frames for the writer thread. */
     private fun drainEncoder(c: MediaCodec) {
         val info = MediaCodec.BufferInfo()
         var frameCount = 0L
@@ -221,19 +238,11 @@ class MirrorService : Service() {
                         buf.position(info.offset)
                         buf.limit(info.offset + info.size)
                         val bytes = ByteArray(info.size).also { buf.get(it) }
-                        if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                            Log.i(TAG, "Captured SPS/PPS config (${bytes.size} bytes)")
-                            codecConfig = bytes
-                        }
-                        val isKeyFrame = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-                        if (isKeyFrame && codecConfig != null) {
-                            sendToClient(codecConfig!!)
-                        }
-                        sendToClient(bytes)
+                        val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                        // PREPEND_HEADER embeds SPS/PPS in every IDR, so we forward everything as-is.
+                        enqueueFrame(bytes, isKey)
                         frameCount++
-                        if (frameCount % 100 == 0L) {
-                            Log.d(TAG, "Sent $frameCount frames to client")
-                        }
+                        if (frameCount % 200 == 0L) Log.d(TAG, "Enqueued $frameCount frames")
                     }
                 } finally {
                     c.releaseOutputBuffer(index, false)
@@ -244,25 +253,54 @@ class MirrorService : Service() {
         }
     }
 
-    private fun sendToClient(bytes: ByteArray) {
-        synchronized(sinkLock) {
-            val out = sink ?: return
-            try {
-                out.writeInt(bytes.size)
-                out.write(bytes)
-                out.flush()
-            } catch (e: IOException) {
-                Log.i(TAG, "Client write failed: ${e.message}")
-                closeClientLocked()
+    private fun enqueueFrame(data: ByteArray, isKey: Boolean) {
+        if (!sendQueue.offer(OutFrame(data, isKey))) {
+            // Queue full: purge and request a fresh keyframe so the client recovers cleanly.
+            Log.w(TAG, "Send queue full; dropping ${sendQueue.size} frames")
+            sendQueue.clear()
+            requestKeyframe()
+            if (isKey) sendQueue.offer(OutFrame(data, true))
+        }
+    }
+
+    private fun writerLoop() {
+        while (running.get()) {
+            val frame = try {
+                sendQueue.poll(100, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                continue
+            } ?: continue
+            synchronized(sinkLock) {
+                val out = sink ?: return@synchronized
+                try {
+                    out.writeInt(frame.data.size)
+                    out.write(frame.data)
+                    out.flush()
+                } catch (e: IOException) {
+                    Log.i(TAG, "Client write failed: ${e.message}")
+                    closeClientLocked()
+                }
             }
         }
     }
 
+    private fun requestKeyframe() {
+        try {
+            codec?.setParameters(Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            })
+        } catch (e: Exception) {
+            Log.w(TAG, "requestKeyframe failed", e)
+        }
+    }
+
     private fun sendResolutionChange(width: Int, height: Int) {
+        // Purge any frames from the old resolution before the size update.
+        sendQueue.clear()
         synchronized(sinkLock) {
             val out = sink ?: return
             try {
-                out.writeInt(0) // A zero payload length starts the v2 resolution update.
+                out.writeInt(0) // zero-length packet == v2 resolution update
                 out.writeInt(width)
                 out.writeInt(height)
                 out.writeInt(FPS)
@@ -302,9 +340,8 @@ class MirrorService : Service() {
                     socket.close()
                     continue
                 }
-                try {
-                    attachClient(socket)
-                } catch (e: Exception) {
+                try { attachClient(socket) }
+                catch (e: Exception) {
                     Log.w(TAG, "Failed to attach client: ${e.message}")
                     try { socket.close() } catch (_: Exception) {}
                 }
@@ -316,7 +353,8 @@ class MirrorService : Service() {
 
     private fun attachClient(socket: Socket) {
         socket.tcpNoDelay = true
-        clientSocket?.let { try { it.close() } catch (_: Exception) {} }
+        // Drop frames buffered for the previous client — they belong to a different session.
+        sendQueue.clear()
         synchronized(sinkLock) {
             closeClientLocked()
             val out = DataOutputStream(socket.getOutputStream())
@@ -325,23 +363,12 @@ class MirrorService : Service() {
             out.writeInt(width)
             out.writeInt(height)
             out.writeInt(FPS)
-            codecConfig?.let {
-                Log.i(TAG, "Sending SPS/PPS config to newly connected client (${it.size} bytes)")
-                out.writeInt(it.size)
-                out.write(it)
-            }
             out.flush()
             clientSocket = socket
             sink = out
         }
         Log.i(TAG, "Desktop connected from ${socket.remoteSocketAddress}")
-        try {
-            codec?.setParameters(Bundle().apply {
-                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-            })
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to request sync frame", e)
-        }
+        requestKeyframe()
     }
 
     private fun notification(): Notification {
@@ -363,6 +390,7 @@ class MirrorService : Service() {
         try { server?.close() } catch (_: Exception) {}
         synchronized(sinkLock) { closeClientLocked() }
         try { drainThread?.join(500) } catch (_: InterruptedException) {}
+        try { writerThread?.join(500) } catch (_: InterruptedException) {}
         projectionCallback?.let { try { projection?.unregisterCallback(it) } catch (_: Exception) {} }
         try { virtualDisplay?.release() } catch (_: Exception) {}
         try { codec?.stop() } catch (_: Exception) {}

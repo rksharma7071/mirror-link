@@ -9,6 +9,6 @@ contextBridge.exposeInMainWorld('mirrorLink', {
   ackFrame: () => ipcRenderer.send('frame-ack'),
   onStatus: cb => ipcRenderer.on('status', (_, v) => cb(v)),
   onVideoSize: cb => ipcRenderer.on('video-size', (_, v) => cb(v)),
-  onFrame: cb => ipcRenderer.on('frame', (_, v) => cb(v)),
+  onNal: cb => ipcRenderer.on('nal', (_, v) => cb(v)),
   onPopoutStatus: cb => ipcRenderer.on('popout-status', (_, v) => cb(v))
 });

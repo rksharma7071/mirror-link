@@ -1,5 +1,5 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
-const { spawn, execFile } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const net = require('net');
 const path = require('path');
@@ -9,24 +9,28 @@ const fs = require('fs');
 const execFileAsync = promisify(execFile);
 const PORT = 27183;
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const ACK_TIMEOUT_MS = 500;
+
 let mainWindow = null;
 let popoutWindow = null;
-let session = null; // one active session at a time
+let session = null;
 
-// IPC Flow-control state: ensure zero queue buildup across Electron IPC
-let mainInFlight = false;
-let popoutInFlight = false;
-let pendingMainFrame = null;
-let pendingPopoutFrame = null;
+// Per-target IPC flow-control state with timeout protection
+const ipcState = {
+  main:   { inFlight: false, pending: null, timer: null },
+  popout: { inFlight: false, pending: null, timer: null }
+};
 
-function resetFrameQueue() {
-  mainInFlight = false;
-  popoutInFlight = false;
-  pendingMainFrame = null;
-  pendingPopoutFrame = null;
+function resetIpcState() {
+  for (const key of ['main', 'popout']) {
+    const s = ipcState[key];
+    if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+    s.inFlight = false;
+    s.pending = null;
+  }
 }
 
-// Augment process.env.PATH with common tool directories (Android SDK, Homebrew, FFmpeg, etc.)
+// Augment PATH with common tool directories
 function augmentPath() {
   const extraDirs = [
     path.join(os.homedir(), 'Library/Android/sdk/platform-tools'),
@@ -34,10 +38,9 @@ function augmentPath() {
     '/opt/homebrew/bin',
     '/opt/homebrew/sbin',
     '/usr/local/bin',
-    'C:\\ffmpeg\\bin',
-    path.join(os.homedir(), 'ffmpeg', 'bin'),
-    path.join(process.env.LOCALAPPDATA || '', 'ffmpeg', 'bin'),
-    'C:\\Program Files\\ffmpeg\\bin'
+    'C:\\platform-tools',
+    path.join(process.env.LOCALAPPDATA || '', 'Android/Sdk/platform-tools'),
+    path.join(process.env.PROGRAMFILES || '', 'Android/android-sdk/platform-tools')
   ];
   const currentPath = process.env.PATH || '';
   const pathSet = new Set(currentPath.split(path.delimiter));
@@ -55,7 +58,6 @@ function findAdb() {
 
   if (process.env.ADB_PATH) candidates.push(process.env.ADB_PATH);
 
-  // Check local.properties from android project directory
   const localPropPaths = [
     path.join(__dirname, '../../android/local.properties'),
     path.join(__dirname, '../android/local.properties'),
@@ -90,57 +92,14 @@ function findAdb() {
     candidates.push('/usr/local/bin/adb');
   }
 
-  const pathDirs = (process.env.PATH || '').split(path.delimiter);
-  for (const dir of pathDirs) {
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
     if (dir) candidates.push(path.join(dir, binaryName));
   }
 
   for (const p of candidates) {
-    try {
-      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
-    } catch (_) { }
+    try { if (fs.existsSync(p) && fs.statSync(p).isFile()) return p; } catch (_) { }
   }
-
   return 'adb';
-}
-
-function findFfmpeg() {
-  const isWin = process.platform === 'win32';
-  const binaryName = isWin ? 'ffmpeg.exe' : 'ffmpeg';
-  const candidates = [];
-
-  if (process.env.FFMPEG_PATH) candidates.push(process.env.FFMPEG_PATH);
-
-  if (process.platform === 'darwin') {
-    candidates.push('/opt/homebrew/bin/ffmpeg');
-    candidates.push('/usr/local/bin/ffmpeg');
-  } else if (isWin) {
-    candidates.push('C:\\ffmpeg\\bin\\ffmpeg.exe');
-    candidates.push(path.join(os.homedir(), 'ffmpeg', 'bin', 'ffmpeg.exe'));
-    if (process.env.LOCALAPPDATA) {
-      candidates.push(path.join(process.env.LOCALAPPDATA, 'ffmpeg', 'bin', 'ffmpeg.exe'));
-      candidates.push(path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'ffmpeg.exe'));
-    }
-    if (process.env.PROGRAMFILES) {
-      candidates.push(path.join(process.env.PROGRAMFILES, 'ffmpeg', 'bin', 'ffmpeg.exe'));
-    }
-  } else {
-    candidates.push('/usr/bin/ffmpeg');
-    candidates.push('/usr/local/bin/ffmpeg');
-  }
-
-  const pathDirs = (process.env.PATH || '').split(path.delimiter);
-  for (const dir of pathDirs) {
-    if (dir) candidates.push(path.join(dir, binaryName));
-  }
-
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
-    } catch (_) { }
-  }
-
-  return 'ffmpeg';
 }
 
 async function adb(args) {
@@ -174,105 +133,132 @@ async function connectedDevice() {
   throw new Error('No Android device found over USB. Ensure USB debugging is enabled and the phone is connected.');
 }
 
-function sendStatus(message) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('status', message);
-  if (popoutWindow && !popoutWindow.isDestroyed()) popoutWindow.webContents.send('status', message);
+// ---- structured status events ----
+// state: 'idle' | 'connecting' | 'live' | 'error' | 'disconnected'
+function sendStatus(state, message) {
+  const payload = { state, message };
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('status', payload);
+  if (popoutWindow && !popoutWindow.isDestroyed()) popoutWindow.webContents.send('status', payload);
 }
 
 function sendVideoSize(header) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('video-size', header);
-  if (popoutWindow && !popoutWindow.isDestroyed()) popoutWindow.webContents.send('video-size', header);
+  const payload = { width: header.width, height: header.height, fps: header.fps };
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('video-size', payload);
+  if (popoutWindow && !popoutWindow.isDestroyed()) popoutWindow.webContents.send('video-size', payload);
 }
 
-function pushLatestFrame(frame) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    if (!mainInFlight) {
-      mainInFlight = true;
-      mainWindow.webContents.send('frame', frame);
-    } else {
-      pendingMainFrame = frame;
-    }
-  }
-
-  if (popoutWindow && !popoutWindow.isDestroyed()) {
-    if (!popoutInFlight) {
-      popoutInFlight = true;
-      popoutWindow.webContents.send('frame', frame);
-    } else {
-      pendingPopoutFrame = frame;
-    }
+// ---- IPC NAL dispatch with ack timeout ----
+function dispatchNal(target, payload) {
+  const win = target === 'main' ? mainWindow : popoutWindow;
+  if (!win || win.isDestroyed()) return;
+  const s = ipcState[target];
+  if (!s.inFlight) {
+    s.inFlight = true;
+    win.webContents.send('nal', payload);
+    armAckTimer(target);
+  } else {
+    s.pending = payload;
   }
 }
 
-// Flow control: Renderer acknowledges it has finished displaying the frame.
+function armAckTimer(target) {
+  const s = ipcState[target];
+  if (s.timer) clearTimeout(s.timer);
+  s.timer = setTimeout(() => {
+    s.timer = null;
+    // Renderer stalled (occluded, crashed, etc.) — release the slot
+    const next = s.pending;
+    s.pending = null;
+    const win = target === 'main' ? mainWindow : popoutWindow;
+    if (next && win && !win.isDestroyed()) {
+      win.webContents.send('nal', next);
+      armAckTimer(target);
+    } else {
+      s.inFlight = false;
+    }
+  }, ACK_TIMEOUT_MS);
+}
+
+function pushNal(payload) {
+  dispatchNal('main', payload);
+  dispatchNal('popout', payload);
+}
+
 ipcMain.on('frame-ack', (event) => {
   const isPopout = popoutWindow && !popoutWindow.isDestroyed() && event.sender === popoutWindow.webContents;
-  if (isPopout) {
-    if (pendingPopoutFrame && popoutWindow && !popoutWindow.isDestroyed()) {
-      const next = pendingPopoutFrame;
-      pendingPopoutFrame = null;
-      popoutWindow.webContents.send('frame', next);
-    } else {
-      popoutInFlight = false;
-    }
-  } else {
-    if (pendingMainFrame && mainWindow && !mainWindow.isDestroyed()) {
-      const next = pendingMainFrame;
-      pendingMainFrame = null;
-      mainWindow.webContents.send('frame', next);
-    } else {
-      mainInFlight = false;
+  const target = isPopout ? 'popout' : 'main';
+  const s = ipcState[target];
+  if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+  if (s.pending) {
+    const next = s.pending;
+    s.pending = null;
+    const win = isPopout ? popoutWindow : mainWindow;
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('nal', next);
+      armAckTimer(target);
+      return;
     }
   }
+  s.inFlight = false;
 });
 
-// ---- session lifecycle (every handler is bound to its own session object) ----
+// ---- session lifecycle ----
 async function endSession(s, message) {
-  resetFrameQueue();
   if (!s || s.closed) return;
   s.closed = true;
   if (session === s) session = null;
   s.socket?.destroy();
-  if (s.ffmpeg) {
-    try { s.ffmpeg.stdin.destroy(); } catch (_) { }
-    s.ffmpeg.kill();
-  }
-  if (message) sendStatus(message);
+  resetIpcState();
+  if (message) sendStatus('disconnected', message);
   if (s.serial) {
     try { await adb(['-s', s.serial, 'forward', '--remove', `tcp:${PORT}`]); } catch (_) { }
   }
 }
 
+// Scan an H.264 byte stream for NAL unit types (returns array of type bytes).
+function scanNalTypes(buf) {
+  const types = [];
+  let i = 0;
+  while (i + 3 < buf.length) {
+    if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 0 && buf[i + 3] === 1) {
+      if (i + 4 < buf.length) types.push(buf[i + 4] & 0x1f);
+      i += 4;
+    } else if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 1) {
+      if (i + 3 < buf.length) types.push(buf[i + 3] & 0x1f);
+      i += 3;
+    } else {
+      i++;
+    }
+  }
+  return types;
+}
+
 async function connect(settings = {}) {
   if (session) await endSession(session);
-  resetFrameQueue();
+  resetIpcState();
 
   const serial = await connectedDevice();
+  try { await adb(['-s', serial, 'forward', '--remove', `tcp:${PORT}`]); } catch (_) { }
   await adb(['-s', serial, 'forward', `tcp:${PORT}`, `tcp:${PORT}`]);
 
   const s = {
-    serial, socket: null, ffmpeg: null, closed: false,
-    pending: Buffer.alloc(0), header: null, started: false, hadError: false,
-    spsPps: null, firstKeyframe: null
-  };
-  s.settings = {
-    maxEdge: [640, 960, 1280, 1920].includes(Number(settings.maxEdge)) ? Number(settings.maxEdge) : 0,
-    fps: [15, 24, 30, 60].includes(Number(settings.fps)) ? Number(settings.fps) : 0
+    serial, socket: null, closed: false,
+    pending: Buffer.alloc(0), header: null, started: false, hadError: false
   };
   session = s;
-  sendStatus(`Connected to ${serial}. Waiting for screen stream…`);
+  sendStatus('connecting', `Connected to ${serial}. Waiting for screen stream…`);
 
   s.socket = net.createConnection({ host: '127.0.0.1', port: PORT });
   s.socket.setNoDelay(true);
 
   s.socket.on('connect', () => {
-    if (!s.closed) sendStatus(`Connected to ${serial}. Requesting screen stream…`);
+    if (!s.closed) sendStatus('connecting', `Connected to ${serial}. Requesting screen stream…`);
   });
 
   s.socket.on('error', error => {
     if (s.closed) return;
     s.hadError = true;
-    sendStatus(error.code === 'ECONNREFUSED'
+    sendStatus('error', error.code === 'ECONNREFUSED'
       ? 'Could not connect to MirrorLink on the phone. Make sure you tapped "Start sharing" in the phone app.'
       : `Connection error: ${error.message}`);
   });
@@ -299,7 +285,8 @@ async function connect(settings = {}) {
       };
       s.pending = s.pending.subarray(20);
       s.started = true;
-      startDecoder(s, s.header);
+      sendVideoSize(s.header);
+      sendStatus('live', `Live: ${s.header.width}×${s.header.height} @ ${s.header.fps}fps.`);
     }
 
     while (s.header && s.pending.length >= 4) {
@@ -319,9 +306,8 @@ async function connect(settings = {}) {
           return void endSession(s, 'The phone sent an invalid screen size update.');
         }
         s.header = { ...s.header, width, height, fps: nextFps };
-        s.spsPps = null;
-        s.firstKeyframe = null;
-        startDecoder(s, s.header);
+        sendVideoSize(s.header);
+        sendStatus('live', `Live: ${width}×${height} @ ${nextFps}fps.`);
         continue;
       }
       if (size > MAX_FRAME_BYTES) {
@@ -331,119 +317,26 @@ async function connect(settings = {}) {
       if (s.pending.length < size + 4) break;
       const packet = s.pending.subarray(4, size + 4);
 
-      // Inspect NAL type (3-byte or 4-byte start codes)
-      const nalType = (packet.length >= 5 && packet[0] === 0 && packet[1] === 0 && packet[2] === 0 && packet[3] === 1)
-        ? (packet[4] & 0x1f)
-        : (packet.length >= 4 && packet[0] === 0 && packet[1] === 0 && packet[2] === 1)
-          ? (packet[3] & 0x1f)
-          : 0;
+      const nalTypes = scanNalTypes(packet);
+      const isKey = nalTypes.includes(5); // IDR slice
 
-      if (nalType === 7) {
-        s.spsPps = Buffer.from(packet);
-      } else if (nalType === 5) {
-        if (!s.firstKeyframe) s.firstKeyframe = Buffer.from(packet);
-      }
+      // Compressed payload is small (a few KB); make a clean copy for IPC.
+      pushNal({
+        data: Buffer.from(packet),
+        isKey,
+        length: packet.length
+      });
 
-      if (s.ffmpeg && !s.ffmpeg.stdin.destroyed && s.ffmpeg.stdin.writable) {
-        s.ffmpeg.stdin.write(packet);
-      }
       s.pending = s.pending.subarray(size + 4);
     }
   });
 
   s.socket.on('close', () => {
-    if (s.closed) return; // superseded or manually disconnected
+    if (s.closed) return;
     endSession(s, s.hadError ? undefined
       : s.started ? 'Phone stopped sharing.'
         : 'Connection closed before stream began. Ensure "Start sharing" was accepted on phone and tap Connect again.');
   });
-}
-
-function startDecoder(s, { width, height, fps }) {
-  resetFrameQueue();
-  const scale = s.settings.maxEdge ? Math.min(1, s.settings.maxEdge / Math.max(width, height)) : 1;
-  const outputWidth = Math.max(2, Math.floor(width * scale / 2) * 2);
-  const outputHeight = Math.max(2, Math.floor(height * scale / 2) * 2);
-  s.outputHeader = { ...s.header, width: outputWidth, height: outputHeight };
-  const filters = [];
-  if (outputWidth !== width || outputHeight !== height) filters.push(`scale=${outputWidth}:${outputHeight}:flags=fast_bilinear`);
-  const args = [
-    '-loglevel', 'error',
-    '-probesize', '32',
-    '-analyzeduration', '0',
-    '-fpsprobesize', '0',
-    '-flags', 'low_delay',
-    '-threads', '1',
-    '-f', 'h264',
-    '-i', 'pipe:0',
-    '-an'
-  ];
-  if (filters.length) args.push('-vf', filters.join(','));
-  args.push('-f', 'rawvideo', '-pix_fmt', 'rgba', 'pipe:1');
-  const previousDecoder = s.ffmpeg;
-  const ff = spawn(findFfmpeg(), args);
-  s.ffmpeg = ff;
-  if (previousDecoder) {
-    try { previousDecoder.stdin.destroy(); } catch (_) { }
-    previousDecoder.kill();
-  }
-
-  ff.on('error', err => {
-    endSession(s, `FFmpeg error (${err.message}). Make sure FFmpeg is installed.`);
-  });
-  ff.stdin.on('error', () => { }); // EPIPE when ffmpeg exits / session ends
-  ff.stderr.on('data', data => {
-    const msg = data.toString().trim();
-    if (msg) console.error('[FFmpeg]', msg);
-  });
-  ff.on('close', () => {
-    if (!s.closed && s.ffmpeg === ff) endSession(s, 'Video decoder stopped.');
-  });
-
-  // Collect chunks and concat once per frame
-  const frameBytes = outputWidth * outputHeight * 4;
-  let chunks = [];
-  let buffered = 0;
-  let framesDecoded = 0;
-  let lastFrameDispatchAt = 0;
-  const minFrameInterval = s.settings.fps ? 1000 / s.settings.fps : 0;
-
-  ff.stdout.on('data', data => {
-    if (s.closed) return;
-    chunks.push(data);
-    buffered += data.length;
-    let newestFrame = null;
-    while (buffered >= frameBytes) {
-      framesDecoded++;
-      const all = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, buffered);
-      newestFrame = Buffer.from(all.subarray(0, frameBytes));
-      const rest = all.subarray(frameBytes);
-      chunks = rest.length ? [rest] : [];
-      buffered = rest.length;
-    }
-    // Only dispatch the newest decoded frame; drop any stale burst frames!
-    if (newestFrame) {
-      const now = Date.now();
-      if (!minFrameInterval || now - lastFrameDispatchAt >= minFrameInterval) {
-        lastFrameDispatchAt = now;
-        pushLatestFrame(newestFrame);
-      }
-    }
-  });
-
-  // FFmpeg's probe over a non-seekable pipe reads and consumes the initial SPS/PPS and keyframe.
-  // Resend the buffered SPS/PPS and IDR frame after 250ms if decoding hasn't produced frames yet.
-  setTimeout(() => {
-    if (!s.closed && framesDecoded === 0 && s.ffmpeg && !s.ffmpeg.stdin.destroyed && s.ffmpeg.stdin.writable) {
-      if (s.spsPps) s.ffmpeg.stdin.write(s.spsPps);
-      if (s.firstKeyframe) s.ffmpeg.stdin.write(s.firstKeyframe);
-    }
-  }, 250);
-
-  sendVideoSize({ width: outputWidth, height: outputHeight, fps });
-  const sizeLabel = outputWidth === width && outputHeight === height ? 'Auto size' : `${outputWidth}×${outputHeight}`;
-  const fpsLabel = s.settings.fps ? `up to ${s.settings.fps}fps` : `${fps || 'Auto'}fps`;
-  sendStatus(`Live: ${sizeLabel} @ ${fpsLabel}.`);
 }
 
 function createPopoutWindow() {
@@ -454,7 +347,7 @@ function createPopoutWindow() {
   popoutWindow = new BrowserWindow({
     width: 900,
     height: 750,
-    title: 'MirrorLink USB - Tab 2 (Detached)',
+    title: 'MirrorLink USB — Detached',
     backgroundColor: '#10131a',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -467,15 +360,17 @@ function createPopoutWindow() {
 
   popoutWindow.webContents.on('did-finish-load', () => {
     if (session && session.header) {
-      popoutWindow.webContents.send('video-size', session.outputHeader || session.header);
-      popoutWindow.webContents.send('status', `Live: ${session.outputHeader?.width || session.header.width}×${session.outputHeader?.height || session.header.height}`);
+      popoutWindow.webContents.send('video-size', session.header);
+      popoutWindow.webContents.send('status', { state: 'live',
+        message: `Live: ${session.header.width}×${session.header.height}` });
     }
   });
 
   popoutWindow.on('closed', () => {
     popoutWindow = null;
-    popoutInFlight = false;
-    pendingPopoutFrame = null;
+    ipcState.popout.inFlight = false;
+    ipcState.popout.pending = null;
+    if (ipcState.popout.timer) { clearTimeout(ipcState.popout.timer); ipcState.popout.timer = null; }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('popout-status', { isPoppedOut: false });
     }
@@ -503,11 +398,10 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.on('closed', () => {
     mainWindow = null;
-    mainInFlight = false;
-    pendingMainFrame = null;
-    if (popoutWindow && !popoutWindow.isDestroyed()) {
-      popoutWindow.close();
-    }
+    ipcState.main.inFlight = false;
+    ipcState.main.pending = null;
+    if (ipcState.main.timer) { clearTimeout(ipcState.main.timer); ipcState.main.timer = null; }
+    if (popoutWindow && !popoutWindow.isDestroyed()) popoutWindow.close();
     endSession(session);
   });
 }
@@ -528,33 +422,25 @@ ipcMain.handle('connect', async (_event, settings) => {
     await connect(settings);
     return { ok: true };
   } catch (error) {
-    sendStatus(error.message);
+    sendStatus('error', error.message);
     return { ok: false, error: error.message };
   }
 });
 
 ipcMain.handle('disconnect', async () => {
   await endSession(session);
-  sendStatus('Disconnected.');
+  sendStatus('idle', 'Disconnected.');
 });
 
-ipcMain.handle('open-popout', async () => {
-  createPopoutWindow();
-  return { ok: true };
-});
+ipcMain.handle('open-popout', async () => { createPopoutWindow(); return { ok: true }; });
 
 ipcMain.handle('close-popout', async () => {
-  if (popoutWindow && !popoutWindow.isDestroyed()) {
-    popoutWindow.close();
-    popoutWindow = null;
-  }
+  if (popoutWindow && !popoutWindow.isDestroyed()) popoutWindow.close();
   return { ok: true };
 });
 
-ipcMain.handle('get-popout-status', async () => {
-  return { isPoppedOut: !!(popoutWindow && !popoutWindow.isDestroyed()) };
-});
+ipcMain.handle('get-popout-status', async () => ({
+  isPoppedOut: !!(popoutWindow && !popoutWindow.isDestroyed())
+}));
 
-app.on('before-quit', () => {
-  endSession(session);
-});
+app.on('before-quit', () => { endSession(session); });

@@ -13,453 +13,157 @@
             --bg-active: #21262d;
             --border-color: #30363d;
             --accent: #2f81f7;
-            --accent-hover: #388bfd;
             --text-main: #f0f6fc;
             --text-muted: #8b949e;
             --green: #238636;
-            --green-badge: #1f6feb;
             --danger: #da3633;
         }
 
-        * {
-            box-sizing: border-box;
-            user-select: none;
-        }
+        * { box-sizing: border-box; user-select: none; }
 
         body {
-            margin: 0;
-            padding: 0;
+            margin: 0; padding: 0;
             background: var(--bg-base);
             color: var(--text-main);
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-            overflow: hidden;
+            display: flex; flex-direction: column; height: 100vh; overflow: hidden;
         }
 
         header {
-            background: var(--bg-card);
-            border-bottom: 1px solid var(--border-color);
-            padding: 12px 20px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 16px;
-            flex-shrink: 0;
+            background: var(--bg-card); border-bottom: 1px solid var(--border-color);
+            padding: 12px 20px; display: flex; align-items: center;
+            justify-content: space-between; gap: 16px; flex-shrink: 0;
         }
 
-        .brand-section {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .brand-logo {
-            height: 36px;
-            width: auto;
-            display: block;
-            object-fit: contain;
-        }
-
-        .brand-title {
-            font-size: 17px;
-            font-weight: 700;
-            letter-spacing: -0.2px;
-            color: var(--text-main);
-            margin: 0;
-        }
+        .brand-section { display: flex; align-items: center; gap: 12px; }
+        .brand-logo { height: 36px; width: auto; display: block; object-fit: contain; }
 
         .badge-hq {
-            background: rgba(47, 129, 247, 0.18);
-            border: 1px solid rgba(47, 129, 247, 0.4);
-            color: #58a6ff;
-            font-size: 11px;
-            font-weight: 600;
-            padding: 3px 8px;
-            border-radius: 12px;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
+            background: rgba(47, 129, 247, 0.18); border: 1px solid rgba(47, 129, 247, 0.4);
+            color: #58a6ff; font-size: 11px; font-weight: 600; padding: 3px 8px;
+            border-radius: 12px; display: inline-flex; align-items: center; gap: 4px;
         }
 
         .badge-res {
-            background: rgba(35, 134, 54, 0.18);
-            border: 1px solid rgba(35, 134, 54, 0.4);
-            color: #3fb950;
-            font-size: 11px;
-            font-weight: 600;
-            padding: 3px 8px;
-            border-radius: 12px;
+            background: rgba(35, 134, 54, 0.18); border: 1px solid rgba(35, 134, 54, 0.4);
+            color: #3fb950; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 12px;
         }
 
-        .btn-group {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-        }
+        .btn-group { display: flex; gap: 8px; align-items: center; }
 
         .stream-settings {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            color: var(--text-muted);
-            font-size: 12px;
+            display: flex; align-items: center; gap: 6px;
+            color: var(--text-muted); font-size: 12px;
         }
 
         .stream-settings select {
-            padding: 6px 8px;
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            background: var(--bg-active);
-            color: var(--text-main);
+            padding: 6px 8px; border: 1px solid var(--border-color);
+            border-radius: 6px; background: var(--bg-active); color: var(--text-main);
         }
 
         button {
-            padding: 7px 14px;
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            background: var(--bg-active);
-            color: var(--text-main);
-            font-size: 13px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.15s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
+            padding: 7px 14px; border: 1px solid var(--border-color); border-radius: 6px;
+            background: var(--bg-active); color: var(--text-main); font-size: 13px;
+            font-weight: 500; cursor: pointer; transition: all 0.15s ease;
+            display: inline-flex; align-items: center; gap: 6px;
         }
-
-        button:hover {
-            border-color: #8b949e;
-            background: #30363d;
-        }
-
-        button.btn-primary {
-            background: var(--green);
-            border-color: #2ea043;
-            color: #fff;
-        }
-
-        button.btn-primary:hover {
-            background: #2ea043;
-        }
-
+        button:hover { border-color: #8b949e; background: #30363d; }
+        button.btn-primary { background: var(--green); border-color: #2ea043; color: #fff; }
+        button.btn-primary:hover { background: #2ea043; }
         button.btn-danger {
-            background: rgba(218, 54, 51, 0.15);
-            border-color: rgba(218, 54, 51, 0.5);
-            color: #f85149;
+            background: rgba(218, 54, 51, 0.15); border-color: rgba(218, 54, 51, 0.5); color: #f85149;
         }
+        button.btn-danger:hover { background: var(--danger); color: #fff; }
 
-        button.btn-danger:hover {
-            background: var(--danger);
-            color: #fff;
-        }
-
-        /* Main Workspace Views */
         .workspace {
-            flex: 1;
-            display: flex;
-            background: #090c10;
-            position: relative;
-            overflow: hidden;
-            align-items: center;
-            justify-content: center;
-            padding: 10px;
-        }
-
-        .view-container {
-            width: 100%;
-            height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
+            flex: 1; display: flex; background: #090c10; position: relative;
+            overflow: hidden; align-items: center; justify-content: center; padding: 10px;
         }
 
         .screen-pane {
-            flex: 1;
-            height: 100%;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            background: #040608;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            overflow: hidden;
-            position: relative;
+            flex: 1; height: 100%; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; background: #040608;
+            border: 1px solid var(--border-color); border-radius: 8px;
+            overflow: hidden; position: relative;
         }
 
         .pane-header {
-            position: absolute;
-            top: 10px;
-            left: 12px;
-            z-index: 10;
-            background: rgba(13, 17, 23, 0.85);
-            backdrop-filter: blur(8px);
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            padding: 4px 10px;
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--text-muted);
-            pointer-events: none;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+            position: absolute; top: 10px; left: 12px; z-index: 10;
+            background: rgba(13, 17, 23, 0.85); backdrop-filter: blur(8px);
+            border: 1px solid var(--border-color); border-radius: 6px;
+            padding: 4px 10px; font-size: 11px; font-weight: 600;
+            color: var(--text-muted); pointer-events: none;
+            display: flex; align-items: center; gap: 6px;
         }
-
-        .pane-header span.dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: #3fb950;
-        }
+        .pane-header span.dot { width: 6px; height: 6px; border-radius: 50%; background: #3fb950; }
 
         .screen-canvas {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
-            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.7);
-            background: #000;
+            max-width: 100%; max-height: 100%; object-fit: contain;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.7); background: #000;
+            /* Use 'auto' — the canvas is often downscaled; crisp-edges aliases text */
             image-rendering: auto;
-            image-rendering: -webkit-optimize-contrast;
-            image-rendering: crisp-edges;
-            /* Smooth size transition on orientation change */
-            transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-                        height 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-                        box-shadow 0.3s ease;
         }
 
-        /* Portrait mode: pane fills height, natural narrow column */
         .screen-pane.orient-portrait {
-            flex: 0 0 auto;
-            width: auto;
-            height: 100%;
-            max-width: 55%;
+            flex: 0 0 auto; width: auto; height: 100%; max-width: 55%;
         }
-
-        /* Landscape mode: pane fills width, short wide row */
         .screen-pane.orient-landscape {
-            flex: 1 1 auto;
-            width: 100%;
-            height: auto;
-            max-width: 100%;
+            flex: 1 1 auto; width: 100%; height: auto; max-width: 100%;
         }
 
-        /* Orientation change flash overlay */
         .rotate-overlay {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 14px;
-            background: rgba(9, 12, 16, 0.82);
-            backdrop-filter: blur(6px);
-            z-index: 20;
-            border-radius: 8px;
-            opacity: 0;
-            pointer-events: none;
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 14px;
+            background: rgba(9, 12, 16, 0.82); backdrop-filter: blur(6px);
+            z-index: 20; border-radius: 8px; opacity: 0; pointer-events: none;
             transition: opacity 0.22s ease;
         }
+        .rotate-overlay.visible { opacity: 1; }
+        .rotate-icon { width: 72px; height: 72px; display: flex; align-items: center; justify-content: center; }
 
-        .rotate-overlay.visible {
-            opacity: 1;
-        }
-
-        /* SVG icon wrapper */
-        .rotate-icon {
-            width: 72px;
-            height: 72px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        /* The phone SVG itself */
-        .orient-svg {
-            overflow: visible;
-        }
-
-        /* Phone body rectangle */
-        .phone-body {
-            fill: none;
-            stroke: #58a6ff;
-            stroke-width: 2.5;
-            stroke-linejoin: round;
-            rx: 4;
-        }
-
-        /* Home indicator bar */
-        .phone-bar {
-            stroke: #58a6ff;
-            stroke-width: 2.5;
-            stroke-linecap: round;
-        }
-
-        /* Curved rotation arrow */
-        .arrow-path {
-            fill: none;
-            stroke: #3fb950;
-            stroke-width: 2.2;
-            stroke-linecap: round;
-        }
-
-        /* Arrowhead triangle */
-        .arrow-head {
-            fill: #3fb950;
-        }
-
-        /* Spin + scale entrance animation for the full SVG group */
         @keyframes orientIn {
             0%   { transform: rotate(-70deg) scale(0.55); opacity: 0; }
             60%  { transform: rotate(8deg)   scale(1.08); opacity: 1; }
             100% { transform: rotate(0deg)   scale(1);    opacity: 1; }
         }
-
-        .rotate-icon svg {
-            animation: orientIn 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-        }
+        .rotate-icon svg { animation: orientIn 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
 
         .rotate-label {
-            font-size: 13px;
-            font-weight: 600;
-            color: #c9d1d9;
-            letter-spacing: 0.3px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+            font-size: 13px; font-weight: 600; color: #c9d1d9; letter-spacing: 0.3px;
+            display: flex; align-items: center; gap: 6px;
         }
-
         .rotate-label .dim-tag {
-            font-size: 11px;
-            font-weight: 500;
-            color: var(--text-muted);
-            background: rgba(255,255,255,0.06);
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            padding: 1px 6px;
-            font-family: monospace;
+            font-size: 11px; font-weight: 500; color: var(--text-muted);
+            background: rgba(255,255,255,0.06); border: 1px solid var(--border-color);
+            border-radius: 6px; padding: 1px 6px; font-family: monospace;
         }
 
-        /* Orientation badge on pane-header */
         .orient-badge {
-            background: rgba(47, 129, 247, 0.15);
-            border: 1px solid rgba(47, 129, 247, 0.35);
-            color: #58a6ff;
-            font-size: 9px;
-            font-weight: 700;
-            padding: 2px 6px 2px 4px;
-            border-radius: 8px;
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
-            transition: all 0.25s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
+            background: rgba(47, 129, 247, 0.15); border: 1px solid rgba(47, 129, 247, 0.35);
+            color: #58a6ff; font-size: 9px; font-weight: 700; padding: 2px 6px 2px 4px;
+            border-radius: 8px; letter-spacing: 0.5px; text-transform: uppercase;
+            transition: all 0.25s ease; display: inline-flex; align-items: center; gap: 4px;
         }
+        .orient-badge svg { flex-shrink: 0; transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        .orient-badge.landscape { background: rgba(35, 134, 54, 0.15); border-color: rgba(35, 134, 54, 0.35); color: #3fb950; }
+        .orient-badge.landscape svg { transform: rotate(90deg); }
 
-        .orient-badge svg {
-            flex-shrink: 0;
-            transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
-        }
-
-        .orient-badge.landscape {
-            background: rgba(35, 134, 54, 0.15);
-            border-color: rgba(35, 134, 54, 0.35);
-            color: #3fb950;
-        }
-
-        /* Rotate the phone icon 90° when in landscape */
-        .orient-badge.landscape svg {
-            transform: rotate(90deg);
-        }
-
-        .detached-state {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            padding: 30px;
-            gap: 16px;
-        }
-
-        .detached-icon {
-            font-size: 44px;
-            color: #58a6ff;
-            opacity: 0.9;
-        }
-
-        .detached-title {
-            font-size: 16px;
-            font-weight: 600;
-            color: var(--text-main);
-            margin: 0;
-        }
-
-        .detached-desc {
-            font-size: 13px;
-            color: var(--text-muted);
-            max-width: 320px;
-            margin: 0;
-        }
-
-        /* Status Footer */
         footer {
-            background: var(--bg-card);
-            border-top: 1px solid var(--border-color);
-            padding: 7px 20px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            font-size: 12px;
-            color: var(--text-muted);
-            flex-shrink: 0;
+            background: var(--bg-card); border-top: 1px solid var(--border-color);
+            padding: 7px 20px; display: flex; align-items: center; justify-content: space-between;
+            font-size: 12px; color: var(--text-muted); flex-shrink: 0;
         }
 
-        #statusText {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            overflow: hidden;
-            white-space: nowrap;
-            text-overflow: ellipsis;
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #d29922;
-            flex-shrink: 0;
-        }
-
-        .status-dot.active {
-            background: #238636;
-        }
-
-        .status-dot.error {
-            background: #da3633;
-        }
-
-        .fps-counter {
-            font-family: monospace;
-            font-size: 11px;
-            color: #58a6ff;
-        }
-
-        .hidden {
-            display: none !important;
-        }
+        #statusText { display: flex; align-items: center; gap: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #d29922; flex-shrink: 0; }
+        .status-dot.active { background: #238636; }
+        .status-dot.error { background: #da3633; }
+        .fps-counter { font-family: monospace; font-size: 11px; color: #58a6ff; }
+        .hidden { display: none !important; }
     </style>
 </head>
 
 <body>
-    <!-- Top Header -->
     <header>
         <div class="brand-section">
             <img src="assets/logo.png" alt="MirrorLink USB" class="brand-logo" id="brandLogo">
@@ -485,6 +189,7 @@
             </select>
         </div>
         <div class="btn-group">
+            <button id="detach" class="hidden" title="Open the stream in a separate window">⧉ Detach Window</button>
             <button id="connect" class="btn-primary">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M7 1v4H5L8 9l3-4H9V1H7zm1 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2z" />
@@ -495,74 +200,30 @@
         </div>
     </header>
 
-    <!-- Main Workspace -->
     <main class="workspace">
-        <div class="view-container" id="viewContainer">
-            <!-- Screen Pane 1 (Tab 1) -->
-            <div class="screen-pane" id="pane1">
-                <div class="pane-header">
-                    <span class="dot"></span>
-                    <span>Screen A</span>
-                    <span class="orient-badge" id="orientBadge1">
-                        <!-- Tiny phone icon — rotates 90° in landscape via CSS -->
-                        <svg width="9" height="14" viewBox="0 0 9 14" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <rect x="0.75" y="0.75" width="7.5" height="12.5" rx="1.5"
-                                  stroke="currentColor" stroke-width="1.5"/>
-                            <line x1="3" y1="11.5" x2="6" y2="11.5"
-                                  stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-                        </svg>
-                        <span id="orientBadgeText">Portrait</span>
-                    </span>
-                </div>
-                <!-- Rotation transition overlay -->
-                <div class="rotate-overlay" id="rotateOverlay1">
-                    <!-- Icon swaps between portrait & landscape SVG via JS -->
-                    <div class="rotate-icon" id="rotateIcon1">
-                        <!-- Portrait → Landscape SVG (default, replaced by JS) -->
-                        <svg id="orientSvgPortrait" class="orient-svg" width="72" height="72" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <!-- Portrait phone -->
-                            <rect x="20" y="8" width="18" height="30" rx="3" class="phone-body"/>
-                            <line x1="26" y1="35" x2="32" y2="35" class="phone-bar"/>
-                            <!-- Curved arrow pointing toward landscape -->
-                            <path d="M 42 18 C 52 18 58 26 56 36" class="arrow-path"/>
-                            <!-- Arrowhead at end of arc -->
-                            <polygon points="53,39 60,34 58,43" class="arrow-head"/>
-                            <!-- Landscape phone (destination) -->
-                            <rect x="40" y="30" width="24" height="14" rx="3" class="phone-body" style="stroke:#3fb950;opacity:0.6"/>
-                            <line x1="58" y1="34" x2="58" y2="40" class="phone-bar" style="stroke:#3fb950;opacity:0.6"/>
-                        </svg>
-                    </div>
-                    <div class="rotate-label" id="rotateLabel1">
-                        <span id="rotateLabelText">Switching to Landscape</span>
-                        <span class="dim-tag" id="rotateDimTag">—</span>
-                    </div>
-                </div>
-                <canvas id="screen1" class="screen-canvas"></canvas>
+        <div class="screen-pane" id="pane1">
+            <div class="pane-header">
+                <span class="dot"></span>
+                <span>Screen</span>
+                <span class="orient-badge" id="orientBadge1">
+                    <svg width="9" height="14" viewBox="0 0 9 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect x="0.75" y="0.75" width="7.5" height="12.5" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+                        <line x1="3" y1="11.5" x2="6" y2="11.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                    </svg>
+                    <span id="orientBadgeText">Portrait</span>
+                </span>
             </div>
-
-            <!-- Screen Pane 2 (Tab 2) -->
-            <div class="screen-pane hidden" id="pane2">
-                <div class="pane-header">
-                    <span class="dot"></span>
-                    <span>Tab 2 (Screen B)</span>
-                </div>
-                <!-- Docked State: Canvas -->
-                <canvas id="screen2" class="screen-canvas"></canvas>
-                <!-- Detached State (When popped out into separate window) -->
-                <div class="detached-state hidden" id="pane2Detached">
-                    <div class="detached-icon">⧉</div>
-                    <h3 class="detached-title">Tab 2 is open in a separate window</h3>
-                    <p class="detached-desc">The high quality stream is actively displaying in an independent floating window.</p>
-                    <div class="btn-group">
-                        <button id="btnFocusPopout" class="btn-primary">Focus Window</button>
-                        <button id="btnDockBack">Dock Back Here</button>
-                    </div>
+            <div class="rotate-overlay" id="rotateOverlay1">
+                <div class="rotate-icon" id="rotateIcon1"></div>
+                <div class="rotate-label">
+                    <span id="rotateLabelText">Switching…</span>
+                    <span class="dim-tag" id="rotateDimTag">—</span>
                 </div>
             </div>
+            <canvas id="screen1" class="screen-canvas"></canvas>
         </div>
     </main>
 
-    <!-- Bottom Status Bar -->
     <footer>
         <div id="statusText">
             <span class="status-dot" id="statusDot"></span>
